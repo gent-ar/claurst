@@ -45,6 +45,7 @@ pub(crate) fn synthesize_permission_description(name: &str, input: &Value) -> St
 
 /// Execute a single tool invocation.
 pub(crate) async fn execute_tool(
+    id: &str,
     name: &str,
     input: &Value,
     tools: &[Box<dyn Tool>],
@@ -53,7 +54,7 @@ pub(crate) async fn execute_tool(
     let tool = tools.iter().find(|t| t.name() == name);
 
     match tool {
-        Some(tool) => {
+        Some(tool) => claurst_tools::TOOL_CALL.scope(claurst_tools::ToolCallBinding::new(id, name, input), async {
             debug!(tool = name, "Executing tool");
             // Central permission backstop (issue #210): if a tool does not gate
             // itself (`self_gates() == false`) and requires a gated permission
@@ -70,7 +71,7 @@ pub(crate) async fn execute_tool(
                 }
             }
             tool.execute(input.clone(), ctx).await
-        }
+        }).await,
         None => {
             warn!(tool = name, "Unknown tool requested");
             ToolResult::error(format!("Unknown tool: {}", name))

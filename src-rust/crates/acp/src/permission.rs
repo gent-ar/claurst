@@ -51,8 +51,9 @@ pub async fn forward_pending(
     let PendingPermissionRequest {
         tool_use_id,
         request,
-        reason,
         decision_tx,
+        call,
+        ..
     } = pending;
 
     let Some(decision_tx) = decision_tx else {
@@ -60,17 +61,18 @@ pub async fn forward_pending(
         return;
     };
 
-    let title = if reason.is_empty() {
-        format!("Approve {}", request.tool_name)
-    } else {
-        reason.clone()
+    let Some(call) = call else {
+        warn!(tool_use_id, "ACP permission: request is not bound to a tool call, denying");
+        let _ = decision_tx.send(PermissionDecision::Deny);
+        return;
     };
 
     let fields = acp::ToolCallUpdateFields::new()
         .kind(Some(infer_tool_kind(&request)))
         .status(Some(acp::ToolCallStatus::Pending))
-        .title(Some(title));
-    let tool_call = acp::ToolCallUpdate::new(acp::ToolCallId::new(tool_use_id.as_str()), fields);
+        .title(Some(call.name))
+        .raw_input(Some(call.input));
+    let tool_call = acp::ToolCallUpdate::new(acp::ToolCallId::new(call.id.as_str()), fields);
 
     let options = vec![
         acp::PermissionOption::new(

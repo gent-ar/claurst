@@ -136,7 +136,7 @@ impl AgentServer {
         );
         *self.client_capabilities.write() = req.client_capabilities.clone();
 
-        let agent_info = acp::Implementation::new("claurst", env!("CARGO_PKG_VERSION"))
+        let agent_info = acp::Implementation::new("claurst", crate::AGENT_VERSION)
             .title(Some("Claurst".to_string()));
 
         let mut response = acp::InitializeResponse::new(acp::ProtocolVersion::V1)
@@ -146,7 +146,9 @@ impl AgentServer {
                     .prompt_capabilities(acp::PromptCapabilities::new())
                     .mcp_capabilities(acp::McpCapabilities::new()),
             );
-        response = response.agent_info(Some(agent_info));
+        let mut binding = acp::Meta::new();
+        binding.insert("gentPermissionBinding".to_string(), serde_json::json!(1));
+        response = response.agent_info(Some(agent_info)).meta(binding);
         Ok(response)
     }
 

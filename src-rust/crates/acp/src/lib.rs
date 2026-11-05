@@ -24,6 +24,7 @@
 //! (see `src-rust/plan/migration-todo.md`).
 
 mod connection;
+mod mcp_tools;
 mod permission;
 mod prompt;
 mod runtime;
@@ -34,6 +35,8 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tracing::{error, info};
+
+pub const AGENT_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+gent.mcp1");
 
 pub use connection::Connection;
 pub use runtime::AgentRuntime;

@@ -171,12 +171,36 @@ pub enum PermissionLevel {
     Forbidden,
 }
 
+#[derive(Debug, Clone)]
+pub struct ToolCallBinding {
+    pub id: String,
+    pub name: String,
+    pub input: Value,
+    approved: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ToolCallBinding {
+    pub fn new(id: &str, name: &str, input: &Value) -> Self {
+        Self {
+            id: id.to_string(),
+            name: name.to_string(),
+            input: input.clone(),
+            approved: Arc::default(),
+        }
+    }
+}
+
+tokio::task_local! {
+    pub static TOOL_CALL: ToolCallBinding;
+}
+
 #[derive(Debug)]
 pub struct PendingPermissionRequest {
     pub tool_use_id: String,
     pub request: claurst_core::permissions::PermissionRequest,
     pub reason: String,
     pub decision_tx: Option<tokio::sync::oneshot::Sender<PermissionDecision>>,
+    pub call: Option<ToolCallBinding>,
 }
 
 #[derive(Default)]
@@ -375,21 +399,36 @@ impl ToolContext {
                     )));
                 };
 
+                let call = TOOL_CALL.try_with(Clone::clone).ok();
+                if call.as_ref().is_some_and(|call| call.approved.load(Ordering::SeqCst)) {
+                    return Ok(());
+                }
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 queue.lock().queue.push_back(PendingPermissionRequest {
-                    tool_use_id: format!(
-                        "perm-{}-{}",
-                        self.session_id,
-                        self.current_turn.fetch_add(1, Ordering::Relaxed)
+                    tool_use_id: call.as_ref().map_or_else(
+                        || {
+                            format!(
+                                "perm-{}-{}",
+                                self.session_id,
+                                self.current_turn.fetch_add(1, Ordering::Relaxed)
+                            )
+                        },
+                        |call| call.id.clone(),
                     ),
                     request,
                     reason: interactive_reason.unwrap_or(reason),
                     decision_tx: Some(tx),
+                    call: call.clone(),
                 });
 
                 let decision = tokio::task::block_in_place(|| rx.blocking_recv());
                 match decision {
-                    Ok(PermissionDecision::Allow | PermissionDecision::AllowPermanently) => Ok(()),
+                    Ok(PermissionDecision::Allow | PermissionDecision::AllowPermanently) => {
+                        if let Some(call) = call {
+                            call.approved.store(true, Ordering::SeqCst);
+                        }
+                        Ok(())
+                    }
                     _ => Err(claurst_core::error::ClaudeError::PermissionDenied(
                         "Permission denied by user".to_string(),
                     )),

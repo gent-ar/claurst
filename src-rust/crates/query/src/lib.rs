@@ -1197,7 +1197,7 @@ pub async fn run_query_loop(
                                     tool_name
                                 ))
                             } else {
-                                execute_tool(&tool_name, &tool_input, tools, tool_ctx).await
+                                execute_tool(&tool_id, &tool_name, &tool_input, tools, tool_ctx).await
                             };
                             if let Some(ref tx) = event_tx {
                                 let _ = tx.send(QueryEvent::ToolEnd {
@@ -1877,10 +1877,11 @@ pub async fn run_query_loop(
                             let r = p.blocked_result.clone().unwrap();
                             futures::future::Either::Left(async move { r })
                         } else {
+                            let id = p.id.clone();
                             let name = p.name.clone();
                             let input = p.input.clone();
                             futures::future::Either::Right(async move {
-                                execute_tool(&name, &input, tools, tool_ctx).await
+                                execute_tool(&id, &name, &input, tools, tool_ctx).await
                             })
                         }
                     })
@@ -2485,7 +2486,7 @@ mod tests {
         })];
         let ctx = deny_all_context();
 
-        let result = execute_tool("MockExec", &serde_json::json!({}), &tools, &ctx).await;
+        let result = execute_tool("mock-call", "MockExec", &serde_json::json!({}), &tools, &ctx).await;
 
         assert!(result.is_error, "central backstop must block a denied tool");
         assert!(
@@ -2508,7 +2509,7 @@ mod tests {
         })];
         let ctx = deny_all_context();
 
-        let result = execute_tool("MockSelfGated", &serde_json::json!({}), &tools, &ctx).await;
+        let result = execute_tool("mock-call", "MockSelfGated", &serde_json::json!({}), &tools, &ctx).await;
 
         assert!(
             !result.is_error,
@@ -2535,7 +2536,7 @@ mod tests {
             })];
             let ctx = deny_all_context();
 
-            let result = execute_tool("MockSafe", &serde_json::json!({}), &tools, &ctx).await;
+            let result = execute_tool("mock-call", "MockSafe", &serde_json::json!({}), &tools, &ctx).await;
 
             assert!(
                 !result.is_error,
@@ -2548,6 +2549,59 @@ mod tests {
                 level
             );
         }
+    }
+
+    struct TwiceGated;
+
+    #[async_trait::async_trait]
+    impl Tool for TwiceGated {
+        fn name(&self) -> &str { "TwiceGated" }
+        fn description(&self) -> &str { "checks permission twice for one operation" }
+        fn permission_level(&self) -> PermissionLevel { PermissionLevel::Write }
+        fn self_gates(&self) -> bool { true }
+        fn input_schema(&self) -> Value { serde_json::json!({"type": "object"}) }
+        async fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
+            for _ in 0..2 {
+                if let Err(e) = ctx.check_permission("TwiceGated", "write", false) {
+                    return ToolResult::error(e.to_string());
+                }
+            }
+            ToolResult::success("written")
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn permission_requests_carry_their_tool_call_and_are_asked_once() {
+        let store = Arc::new(parking_lot::Mutex::new(claurst_tools::PendingPermissionStore::default()));
+        let mut ctx = deny_all_context();
+        ctx.non_interactive = false;
+        ctx.pending_permissions = Some(store.clone());
+        let input = serde_json::json!({"file_path": "a.txt"});
+        let approver = {
+            let store = store.clone();
+            tokio::spawn(async move {
+                let mut asked = Vec::new();
+                for _ in 0..40 {
+                    for pending in store.lock().queue.drain(..) {
+                        let call = pending.call.clone().unwrap();
+                        asked.push((pending.tool_use_id.clone(), call.id, call.name, call.input));
+                        let _ = pending.decision_tx.unwrap().send(claurst_core::permissions::PermissionDecision::Allow);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                asked
+            })
+        };
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(TwiceGated)];
+
+        let result = execute_tool("call-1", "TwiceGated", &input, &tools, &ctx).await;
+
+        assert_eq!(result.content, "written");
+        let asked = approver.await.unwrap();
+        assert_eq!(
+            asked,
+            vec![("call-1".to_string(), "call-1".to_string(), "TwiceGated".to_string(), input)]
+        );
     }
 
     #[test]
